@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       afk_minutes:
-        description: "AFK 挂机时长（分钟，默认 60）"
+        description: "AFK 挂机时长（分钟，默认 10）"
         required: false
-        default: '60'
+        default: '10'
       enable_claim:
         description: "是否自动每日签到 (true/false)"
         required: false
