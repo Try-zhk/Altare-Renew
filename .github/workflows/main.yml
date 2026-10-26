@@ -1,0 +1,233 @@
+name: Altare-Daily
+
+on:
+  workflow_dispatch:
+    inputs:
+      afk_minutes:
+        description: "AFK 挂机时长（分钟，默认 10）"
+        required: false
+        default: '10'
+      enable_claim:
+        description: "是否自动每日签到 (true/false)"
+        required: false
+        default: 'true'
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 定时执行签到 + 挂机
+    - cron: '0 0 * * *'
+    # 每 6 小时自动执行一次挂机（循环挂机积累积分）
+    - cron: '0 6,12,18 * * *'
+
+# 同一时刻只跑一个：重复触发时排队而不是并发
+concurrency:
+  group: altare-renew
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # 最长运行 6 小时
+
+    steps:
+      - name: 📥 检出代码
+        uses: actions/checkout@v4
+
+      - name: 📥 拉取私库代码与内核（公私库分离模式）
+        env:
+          PR_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
+          TARGET_REPO: ${{ secrets.GIT_REPO || format('{0}/Altare-Renew-Private', github.repository_owner) }}
+        run: |
+          if [ -n "$PR_TOKEN" ]; then
+            echo "📦 从私库 $TARGET_REPO 检出代码与内核..."
+            rm -rf private
+            if git clone "https://x-access-token:${PR_TOKEN}@github.com/${TARGET_REPO}.git" private; then
+              cp -rf private/* ./ 2>/dev/null || true
+              echo "✅ 私库资源已同步到工作目录"
+            else
+              echo "⚠️ 私库克隆失败，若为单仓库模式将继续使用当前仓库文件"
+            fi
+          else
+            echo "ℹ️ 未设置 PRIVATE_REPO_TOKEN，使用当前仓库文件（单仓库模式）"
+          fi
+
+      - name: 🐍 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 安装 Python 依赖
+        run: |
+          pip install -r requirements.txt --quiet
+
+      - name: 🛡️ 启动 sing-box 代理转发（固定 IP，不可用时自动切备用）
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
+        run: |
+          if [ -z "$PROXY_URL" ]; then
+            echo "ℹ️ 未设置 PROXY_URL，跳过 sing-box 代理启动（直连模式）。"
+            echo "PROXY_ROLE=直连" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "📦 查找 sing-box 压缩包..."
+          SB_ARCHIVE=$(ls sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
+          if [ -z "$SB_ARCHIVE" ]; then
+            echo "❌ 未找到 sing-box-*-linux-amd64.tar.gz 压缩包！"
+            exit 1
+          fi
+          echo "📦 使用压缩包: $SB_ARCHIVE"
+
+          mkdir -p sb_extract
+          tar -xzf "$SB_ARCHIVE" --strip-components=1 -C sb_extract
+          cp sb_extract/sing-box ./sing-box
+          chmod +x ./sing-box
+          ./sing-box version
+
+          # 代理启动脚本库
+          cat > proxy_lib.sh <<'SH'
+          mask_ip() { sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/g'; }
+
+          start_proxy() {
+            local ROLE="$1" URL="$2" PID OUT CURL_STATUS i
+            pkill -f "sing-box run" >/dev/null 2>&1 || true
+            for i in $(seq 1 10); do
+              ss -ltn 2>/dev/null | grep -q ':8080 ' || break
+              sleep 0.5
+            done
+            if ss -ltn 2>/dev/null | grep -q ':8080 '; then
+              pkill -9 -f "sing-box run" >/dev/null 2>&1 || true
+              sleep 1
+            fi
+
+            echo "🔧 [$ROLE] 解析代理链接，生成 sing-box 配置..."
+            if ! python3 linktosb.py "$URL" -o singbox.json --port 8080; then
+              echo "❌ [$ROLE] 代理链接解析失败，请检查链接格式。"
+              return 1
+            fi
+
+            echo "🔍 [$ROLE] 检查 sing-box 配置..."
+            if ! ./sing-box check -c singbox.json; then
+              echo "❌ [$ROLE] sing-box 配置检查失败。"
+              return 1
+            fi
+
+            echo "🚀 [$ROLE] 启动 sing-box (端口: 8080)..."
+            nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
+            PID=$!
+            sleep 3
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ [$ROLE] sing-box 启动后异常退出，日志如下："
+              tail -n 20 singbox.log | mask_ip
+              return 1
+            fi
+
+            echo "✅ [$ROLE] sing-box 已启动，测试代理连通性..."
+            if OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://checkip.amazonaws.com) \
+               || OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://api.ipify.org); then
+              OUT=$(echo "$OUT" | tr -d '[:space:]')
+              if [ -z "$OUT" ]; then
+                echo "❌ [$ROLE] 代理连接成功，但未获取到出口 IP。"
+                tail -n 20 singbox.log | mask_ip
+                return 1
+              fi
+              echo "✅ [$ROLE] 出口 IP（已脱敏）：$(echo "$OUT" | mask_ip)"
+
+              CF=$(curl -sS -m 10 --proxy http://127.0.0.1:8080 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+              CF_IP=$(echo "$CF" | sed -n 's/^ip=//p' | head -n1 | tr -d '[:space:]')
+              CF_LOC=$(echo "$CF" | sed -n 's/^colo=//p;s/^loc=//p' | tr -d '\r' | paste -sd/ -)
+              if [ -n "$CF_IP" ]; then
+                echo "✅ [$ROLE] Cloudflare 出口节点：$(echo "$CF_IP" | mask_ip)（$CF_LOC）"
+              fi
+              return 0
+            else
+              CURL_STATUS=$?
+              echo "❌ [$ROLE] 代理连通性测试失败，curl exit code: $CURL_STATUS"
+              tail -n 20 singbox.log | mask_ip
+              return 1
+            fi
+          }
+          SH
+
+          source ./proxy_lib.sh
+          ROLE="主用"
+          if ! start_proxy "主用" "$PROXY_URL"; then
+            if [ -n "$PROXY_URL_BACKUP" ]; then
+              echo "⚠️ 主用代理不可用，切换备用代理..."
+              if start_proxy "备用" "$PROXY_URL_BACKUP"; then
+                ROLE="备用"
+              else
+                echo "❌ 主用与备用代理均不可用。"
+                exit 1
+              fi
+            else
+              echo "❌ 主用代理不可用，且未设置备用代理 PROXY_URL_BACKUP。"
+              exit 1
+            fi
+          fi
+          echo "PROXY_ROLE=$ROLE" >> "$GITHUB_ENV"
+          echo "🧭 当前代理线路：$ROLE"
+
+      - name: 🪙 执行 Altare 每日任务（签到 + AFK 挂机）
+        id: run_altare
+        env:
+          ALTARE_AUTH: ${{ secrets.ALTARE_AUTH }}
+          ALTARE_EMAIL: ${{ secrets.ALTARE_EMAIL }}
+          ALTARE_PASSWORD: ${{ secrets.ALTARE_PASSWORD }}
+          ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
+          ALTARE_TENANT_ID: ${{ secrets.ALTARE_TENANT_ID }}
+          GIT_REPO: ${{ secrets.GIT_REPO || github.repository }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
+          AFK_MINUTES: ${{ (github.event_name == 'workflow_dispatch' && inputs.afk_minutes) || '10' }}
+          ENABLE_DAILY_CLAIM: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_claim) || 'true' }}
+        run: |
+          run_task() {
+            python3 -u altare_renew.py
+          }
+
+          set +e
+          run_task
+          RC=$?
+
+          # 主用失败 → 切备用代理再试一次
+          if [ "$RC" -ne 0 ] && [ -n "$PROXY_URL" ] && [ -n "$PROXY_URL_BACKUP" ] && [ "$PROXY_ROLE" = "主用" ]; then
+            echo "⚠️ 主用线路任务失败（exit $RC），切换备用代理再试一次..."
+            source ./proxy_lib.sh
+            if start_proxy "备用" "$PROXY_URL_BACKUP"; then
+              echo "PROXY_ROLE=备用" >> "$GITHUB_ENV"
+              run_task
+              RC=$?
+            else
+              echo "❌ 备用代理启动失败，保留主用线路的失败结果。"
+            fi
+          fi
+          exit "$RC"
+
+      - name: 📨 工作流级失败兜底通知
+        if: failure() && steps.run_altare.outcome != 'failure'
+        env:
+          TG_BOT: ${{ secrets.TG_BOT }}
+        run: |
+          if [ -z "$TG_BOT" ]; then
+            echo "ℹ️ 未设置 TG_BOT，跳过兜底通知。"
+            exit 0
+          fi
+
+          CHAT_ID="${TG_BOT%%,*}"
+          BOT_TOKEN="${TG_BOT#*,}"
+          RUN_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (北京时间)')
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          MSG=$(printf '%s\n%s\n%s\n%s' \
+            "🪙 Altare 每日任务异常通知" \
+            "🕐 运行时间: ${RUN_TIME}" \
+            "📊 结果: ❌ 工作流提前异常退出！" \
+            "📝 原因: 在运行脚本之前（如 sing-box 启动或环境准备阶段）发生异常，详情：${RUN_URL}")
+
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            --data-urlencode "text=${MSG}" > /dev/null || true
