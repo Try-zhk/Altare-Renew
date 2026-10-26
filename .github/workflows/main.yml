@@ -44,9 +44,10 @@ jobs:
         run: |
           pip install requests pynacl playwright --quiet
 
-      - name: 🌐 安装浏览器内核与虚拟显示服务 (对齐 FreezeHost 反风控)
+      - name: 🌐 确认系统 Google Chrome 与安装虚拟显示服务 (对齐 XS/Freeze 反风控)
         run: |
-          python3 -m playwright install --with-deps chromium
+          # ubuntu-latest 镜像预装了官方原装 Google Chrome，秒级检测就绪
+          google-chrome --version || python3 -m playwright install --with-deps chrome
           command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
 
       - name: 🛡️ 启动 sing-box 代理转发（固定 IP，不可用时自动切备用）
@@ -176,7 +177,7 @@ jobs:
           ENABLE_DAILY_CLAIM: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_claim) || 'true' }}
         run: |
           run_task() {
-            xvfb-run -a python3 -u altare_renew.py
+            xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u altare_renew.py
           }
 
           set +e
