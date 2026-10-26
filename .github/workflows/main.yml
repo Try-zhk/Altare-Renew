@@ -28,36 +28,21 @@ jobs:
     timeout-minutes: 360 # 最长运行 6 小时
 
     steps:
-      - name: 📥 检出代码
+      - name: 📥 拉取私库代码与内核
         uses: actions/checkout@v4
-
-      - name: 📥 拉取私库代码与内核（公私库分离模式）
-        env:
-          PR_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
-          TARGET_REPO: ${{ secrets.GIT_REPO || format('{0}/Altare-Renew-Private', github.repository_owner) }}
-        run: |
-          if [ -n "$PR_TOKEN" ]; then
-            echo "📦 从私库 $TARGET_REPO 检出代码与内核..."
-            rm -rf private
-            if git clone "https://x-access-token:${PR_TOKEN}@github.com/${TARGET_REPO}.git" private; then
-              cp -rf private/* ./ 2>/dev/null || true
-              echo "✅ 私库资源已同步到工作目录"
-            else
-              echo "⚠️ 私库克隆失败，若为单仓库模式将继续使用当前仓库文件"
-            fi
-          else
-            echo "ℹ️ 未设置 PRIVATE_REPO_TOKEN，使用当前仓库文件（单仓库模式）"
-          fi
-
-      - name: 🐍 配置 Python 环境
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          repository: ${{ github.repository_owner }}/Altare-Renew-Private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
 
-      - name: 📦 安装 Python 依赖
+      - name: 📂 复制私库文件到工作目录
         run: |
-          pip install -r requirements.txt --quiet
+          cp -r private/* ./
+          ls -la
+
+      - name: 🐍 安装 Python 依赖
+        run: |
+          pip install requests pynacl --quiet
 
       - name: 🛡️ 启动 sing-box 代理转发（固定 IP，不可用时自动切备用）
         env:
@@ -73,7 +58,7 @@ jobs:
           echo "📦 查找 sing-box 压缩包..."
           SB_ARCHIVE=$(ls sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
           if [ -z "$SB_ARCHIVE" ]; then
-            echo "❌ 未找到 sing-box-*-linux-amd64.tar.gz 压缩包！"
+            echo "❌ 未找到 sing-box-*-linux-amd64.tar.gz 压缩包！请检查是否已上传到私库。"
             exit 1
           fi
           echo "📦 使用压缩包: $SB_ARCHIVE"
@@ -177,8 +162,8 @@ jobs:
           ALTARE_PASSWORD: ${{ secrets.ALTARE_PASSWORD }}
           ALTARE_TOKEN: ${{ secrets.ALTARE_TOKEN }}
           ALTARE_TENANT_ID: ${{ secrets.ALTARE_TENANT_ID }}
-          GIT_REPO: ${{ secrets.GIT_REPO || github.repository }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          GIT_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN || secrets.GH_TOKEN }}
           TG_BOT: ${{ secrets.TG_BOT }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
