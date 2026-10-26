@@ -42,7 +42,12 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install requests pynacl --quiet
+          pip install requests pynacl playwright --quiet
+
+      - name: 🌐 安装浏览器内核与虚拟显示服务 (对齐 FreezeHost 反风控)
+        run: |
+          python3 -m playwright install --with-deps chromium
+          command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
 
       - name: 🛡️ 启动 sing-box 代理转发（固定 IP，不可用时自动切备用）
         env:
@@ -154,7 +159,7 @@ jobs:
           echo "PROXY_ROLE=$ROLE" >> "$GITHUB_ENV"
           echo "🧭 当前代理线路：$ROLE"
 
-      - name: 🪙 执行 Altare 每日任务（签到 + AFK 挂机）
+      - name: 🪙 执行 Altare 每日任务（签到 + 真浏览器 AFK 挂机）
         id: run_altare
         env:
           ALTARE_AUTH: ${{ secrets.ALTARE_AUTH }}
@@ -171,7 +176,7 @@ jobs:
           ENABLE_DAILY_CLAIM: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_claim) || 'true' }}
         run: |
           run_task() {
-            python3 -u altare_renew.py
+            xvfb-run -a python3 -u altare_renew.py
           }
 
           set +e
