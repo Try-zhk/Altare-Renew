@@ -11,6 +11,10 @@ on:
         description: "是否自动每日签到 (true/false)"
         required: false
         default: 'true'
+      auto_start_server:
+        description: "是否自动检测并开启停止/暂停的服务器 (true/false)"
+        required: false
+        default: 'true'
   schedule:
     # 每天 UTC 00:00 (北京时间 08:00) 定时执行签到 + 挂机
     - cron: '0 0 * * *'
@@ -42,12 +46,12 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install requests pynacl playwright --quiet
+          pip install requests pynacl patchright --quiet
 
       - name: 🌐 确认系统 Google Chrome 与安装虚拟显示服务 (对齐 XS/Freeze 反风控)
         run: |
-          # ubuntu-latest 镜像预装了官方原装 Google Chrome，秒级检测就绪
-          google-chrome --version || python3 -m playwright install --with-deps chrome
+          # patchright 优先使用系统原装 Google Chrome（ubuntu-latest 预装，秒级就绪）
+          google-chrome --version || python -m patchright install --with-deps chrome
           command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
 
       - name: 🛡️ 启动 sing-box 代理转发（固定 IP，不可用时自动切备用）
@@ -62,10 +66,19 @@ jobs:
           fi
 
           echo "📦 查找 sing-box 压缩包..."
-          SB_ARCHIVE=$(ls sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
+          SB_ARCHIVE=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
+          if [ -z "$SB_ARCHIVE" ]; then
+            # 兜底：复制后的根目录
+            SB_ARCHIVE=$(ls sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
+          fi
           if [ -z "$SB_ARCHIVE" ]; then
             echo "❌ 未找到 sing-box-*-linux-amd64.tar.gz 压缩包！请检查是否已上传到私库。"
             exit 1
+          fi
+          MATCH_COUNT=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | wc -l)
+          if [ "$MATCH_COUNT" -gt 1 ]; then
+            echo "⚠️ 私库里有多个 sing-box 压缩包，取到的是: $SB_ARCHIVE"
+            echo "⚠️ 建议只保留一个版本，避免版本混用。"
           fi
           echo "📦 使用压缩包: $SB_ARCHIVE"
 
@@ -175,6 +188,7 @@ jobs:
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
           AFK_MINUTES: ${{ (github.event_name == 'workflow_dispatch' && inputs.afk_minutes) || '10' }}
           ENABLE_DAILY_CLAIM: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_claim) || 'true' }}
+          AUTO_START_SERVER: ${{ (github.event_name == 'workflow_dispatch' && inputs.auto_start_server) || 'true' }}
         run: |
           run_task() {
             xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u altare_renew.py
